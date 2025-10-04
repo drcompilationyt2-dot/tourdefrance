@@ -3,10 +3,10 @@
   "sessionPath": "sessions",
 
   "headless": true,
-  "globalTimeout": "50s",
+  "globalTimeout": "30s",
   "parallel": false,
   "runOnZeroPoints": false,
-  "clusters": 1,
+  "clusters": 3,
   "passesPerRun": 1,
 
   "saveFingerprint": {
@@ -16,13 +16,13 @@
 
   "browser": {
     "headless": true,
-    "globalTimeout": "50s"
+    "globalTimeout": "30s"
   },
 
   "execution": {
     "parallel": false,
     "runOnZeroPoints": false,
-    "clusters": 1,
+    "clusters": 3,
     "passesPerRun": 1
   },
 
@@ -197,7 +197,3 @@
   "gmailSearchDelayMs": 1200,
   "passwordFillDelayMs": 600
 }
-
-
-
-
