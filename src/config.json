@@ -6,7 +6,7 @@
   "globalTimeout": "30s",
   "parallel": false,
   "runOnZeroPoints": false,
-  "clusters": 3,
+  "clusters": 1,
   "passesPerRun": 1,
 
   "saveFingerprint": {
@@ -22,7 +22,7 @@
   "execution": {
     "parallel": false,
     "runOnZeroPoints": false,
-    "clusters": 3,
+    "clusters": 1,
     "passesPerRun": 1
   },
 
@@ -197,3 +197,4 @@
   "gmailSearchDelayMs": 1200,
   "passwordFillDelayMs": 600
 }
+
