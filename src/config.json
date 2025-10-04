@@ -3,7 +3,7 @@
   "sessionPath": "sessions",
 
   "headless": true,
-  "globalTimeout": "90s",
+  "globalTimeout": "50s",
   "parallel": false,
   "runOnZeroPoints": false,
   "clusters": 1,
@@ -16,7 +16,7 @@
 
   "browser": {
     "headless": true,
-    "globalTimeout": "90s"
+    "globalTimeout": "50s"
   },
 
   "execution": {
@@ -197,6 +197,7 @@
   "gmailSearchDelayMs": 1200,
   "passwordFillDelayMs": 600
 }
+
 
 
 
