@@ -165,7 +165,7 @@ export class Login {
             // Check if account is locked
             await this.checkAccountLocked(page)
 
-            const isLoggedIn = await page.waitForSelector('html[data-role-name="RewardsPortal"]', { timeout: 120000 }).then(() => true).catch(() => false)
+            const isLoggedIn = await page.waitForSelector('html[data-role-name="RewardsPortal"]', { timeout: 10000 }).then(() => true).catch(() => false)
 
             if (!isLoggedIn) {
                 const execResult = await this.execLogin(page, email, password)
@@ -1224,7 +1224,7 @@ export class Login {
             }
         }
 
-        await page.waitForSelector('html[data-role-name="RewardsPortal"]', { timeout: 120000 })
+        await page.waitForSelector('html[data-role-name="RewardsPortal"]', { timeout: 10000 })
         this.bot.log(this.bot.isMobile, 'LOGIN', 'Successfully logged into the rewards portal')
     }
 
