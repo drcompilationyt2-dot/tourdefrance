@@ -2,8 +2,7 @@ name: "runner 2"
 
 on:
   schedule:
-    # triggers at 11:00 UTC (keeps the prior UTC mapping; internal check expects Toronto 06:00)
-    - cron: '0 11 * * *'
+    - cron: '0 16 * * *'
   workflow_dispatch:
     inputs:
       simulate_schedule:
@@ -13,15 +12,15 @@ on:
 
 jobs:
   run-rewards:
-    # run only on your self-hosted runner that has these exact labels
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
     env:
       NODE_VERSION: '20'
       SIMULATE_SCHEDULE: ${{ github.event.inputs.simulate_schedule || 'false' }}
       JOB_INDEX: '1'
       GROUP_SIZES: '3,2,2'
-      TARGET_HOUR_TORONTO: '6'        # internal guard expects 6:00 AM Toronto
-      MAX_JITTER_SECONDS: '2400'
+      TARGET_HOUR_TORONTO: '11'
+      MAX_JITTER_SECONDS: '2400' # 2.3 hours
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 
     steps:
@@ -73,10 +72,14 @@ jobs:
           ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON || '' }}
         run: |
           set -euo pipefail
+          # strict permissions for created files
           umask 077
           mkdir -p src dist
+
           echo "=== repo root listing (masked) ==="
+          # show root listing but hide any accounts.json to avoid accidental exposure
           ls -la | sed '/src\/accounts.json/d' || true
+
           TMP=""
           trap '[[ -n "$TMP" && -f "$TMP" ]] && rm -f "$TMP" || true' EXIT
 
@@ -146,6 +149,7 @@ jobs:
             fi
           fi
 
+          # Validate JSON (without printing it)
           if command -v jq >/dev/null 2>&1; then
             jq . src/accounts.json >/dev/null || { echo "Invalid JSON in src/accounts.json" >&2; exit 1; }
             echo "src/accounts.json validated by jq"
@@ -153,6 +157,7 @@ jobs:
             node -e "try{JSON.parse(require('fs').readFileSync('src/accounts.json','utf8')); console.log('validated')}catch(e){ console.error('Invalid JSON:', e.message); process.exit(2) }"
           fi
 
+          # Make a build/runtime copy immediately and lock permissions (owner-only)
           cp src/accounts.json dist/accounts.json
           chmod 600 src/accounts.json dist/accounts.json || true
           echo "Wrote and locked src/accounts.json and dist/accounts.json (owner-only)."
@@ -167,7 +172,10 @@ jobs:
           const src = 'src/accounts.json';
           if (!fs.existsSync(src)) { console.error('src/accounts.json not found'); process.exit(1); }
           const arr = JSON.parse(fs.readFileSync(src,'utf8') || '[]');
+
+          // normalize/write back to src (no-op) to ensure consistent formatting
           fs.writeFileSync('src/accounts.json', JSON.stringify(arr, null, 2));
+
           function maskEmail(email){
             if(!email || typeof email !== 'string') return '(no-email)';
             const [local, domain] = email.split('@');
@@ -177,13 +185,18 @@ jobs:
             const middleMask = local.length <= 3 ? '***' : '****';
             return `${first}${middleMask}${last}@${domain}`;
           }
+
           const summary = arr.map((a, idx) => {
             const email = a.email || a.username || a.user || '';
             const id = a.id || a.name || a.username || null;
             return { index: idx, id: id || null, email: email ? maskEmail(email) : '(no-email)' };
           });
+
+          // Print only counts + masked small summary (no secrets)
           console.log('Assigned account count:', summary.length);
           console.log('Masked accounts (first 10):', JSON.stringify(summary.slice(0,10), null, 2));
+
+          // write masked artifact for audit (masked)
           if (!fs.existsSync('dist')) fs.mkdirSync('dist', { recursive: true });
           fs.writeFileSync('dist/assigned_masked_summary.json', JSON.stringify(summary, null, 2));
           NODE
@@ -234,8 +247,8 @@ jobs:
           if [ -f dist/accounts.json ]; then
             echo "dist/accounts.json present"
           elif [ -f src/accounts.json ]; then
-            cp src.accounts.json dist/accounts.json
-            chmod 600 dist.accounts.json || true
+            cp src/accounts.json dist/accounts.json
+            chmod 600 dist/accounts.json || true
             echo "Copied src/accounts.json -> dist/accounts.json"
           else
             echo "WARNING: src/accounts.json missing — job may fail." >&2
@@ -268,6 +281,8 @@ jobs:
             sh -c "stdbuf -oL -eL node -r ./dist/polyfill-file.js ./dist/index.js 2>&1 | tee -a logs/script.log" || true
           ps auxww > logs/ps-auxww.txt || true
           ls -laR > logs/ls-laR.txt || true
+          # IMPORTANT: do NOT dump the entire environment to a file (would leak secrets)
+          # env > logs/env.raw || true   <-- removed to prevent secret leakage
 
       - name: Sanitize logs (mask emails, redact tokens & passwords) before upload
         shell: bash
@@ -277,8 +292,10 @@ jobs:
           cat > dist/sanitize_logs.js <<'NODE'
           const fs = require('fs');
           const { execSync } = require('child_process');
+
           const logPath = 'logs/script.log';
           const filesToSanitize = [logPath].filter(p => fs.existsSync(p));
+
           function maskEmailStr(s){
             return s.replace(/([A-Za-z0-9._%+-]+)@([A-Za-z0-9.-]+\.[A-Za-z]{2,})/g, (m, local, domain) => {
               const first = local.slice(0,2);
@@ -287,31 +304,56 @@ jobs:
               return `${first}${middleMask}${last}@${domain}`;
             });
           }
+
           function sanitizeContent(content){
             if(!content) return content;
+            // Truncate extremely long lines (protect against huge tokens)
             content = content.split('\n').map(line => line.length > 1000 ? line.slice(0,1000) + '...[TRUNCATED]' : line).join('\n');
+
+            // mask emails
             content = maskEmailStr(content);
+
+            // redact JSON-style secret fields: "password": "...", "token": "...", "secret": "..."
             content = content.replace(/("(?:(?:P|p)assword|pwd|pass|token|secret|api[_-]?key|apikey)\"?\s*:\s*")([^"]+)"/g, '$1***REDACTED***"');
+
+            // redact shell-style assignments like PASSWORD=..., TOKEN=...
             content = content.replace(/(\b(?:(?:P|p)ass(?:word)?|pwd|token|secret|api[_-]?key|apikey|auth|key|credential)\b\s*[:=]\s*)([^\\s,;]+)/gi, '$1***REDACTED***');
+
+            // redact Authorization Bearer/Basic tokens
             content = content.replace(/(Authorization[:=]?\s*)(Bearer|Basic)?\s*[A-Za-z0-9\-_.=]+/gi, '$1$2 ***REDACTED***');
+
+            // redact long base64/hex/blobs
             content = content.replace(/\b[A-Za-z0-9+\/]{40,}={0,2}\b/g, '***REDACTED_BASE64***');
             content = content.replace(/\b[0-9a-fA-F]{40,}\b/g, '***REDACTED_HEX***');
+
+            // collapse sequences that look like JWTs
             content = content.replace(/[A-Za-z0-9-_]{10,}\.[A-Za-z0-9-_]{10,}\.[A-Za-z0-9-_]{10,}/g, '***REDACTED_JWT***');
+
             return content;
           }
+
           for (const p of filesToSanitize) {
             try {
               const raw = fs.readFileSync(p, 'utf8');
               fs.writeFileSync(p, sanitizeContent(raw), 'utf8');
-            } catch (e) {}
+            } catch (e) {
+              // ignore read/write errors
+            }
           }
+
+          // lock down logs and dist to owner-only where possible
           try { execSync('chmod -R 600 logs || true'); } catch(e) {}
           try { execSync('chmod -R 600 dist || true'); } catch(e) {}
+
+          // create a sanitized tarball for upload (contains sanitized logs)
           try { execSync('tar -czf logs-full-sanitized.tar.gz logs || true'); } catch(e) {}
+
           console.log('Sanitization complete. Files locked to owner-only where possible.');
           NODE
 
           node dist/sanitize_logs.js || true
+
+          # additional fallback redaction (defensive)
           sed -E -i 's/("(?:(?:P|p)assword|pwd|pass|token|secret)\"?\s*:\s*")[^"]+"/\1***REDACTED***"/Ig' logs/script.log || true
           sed -E -i 's/([Pp]ass(word)?|pwd|token|secret|api[_-]?key|apikey|auth|key|credential)[[:space:]]*[:=][[:space:]]*[^[:space:],;]+/\1=***REDACTED***/g' logs/script.log || true
           sed -E -i 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/***REDACTED_EMAIL***/g' logs/script.log || true
