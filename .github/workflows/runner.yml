@@ -2,7 +2,7 @@ name: "runner 2"
 
 on:
   schedule:
-    # triggers at 11:00 UTC (used previously as the UTC mapping for your Toronto-based hour)
+    # triggers at 11:00 UTC (keeps the prior UTC mapping; internal check expects Toronto 06:00)
     - cron: '0 11 * * *'
   workflow_dispatch:
     inputs:
@@ -13,15 +13,15 @@ on:
 
 jobs:
   run-rewards:
-    # run on your self-hosted runner (use the labels you gave the runner when you configured it)
-    runs-on: [self-hosted, ubuntu, amd]
+    # run only on your self-hosted runner that has these exact labels
+    runs-on: [self-hosted, Linux, X64]
     env:
       NODE_VERSION: '20'
       SIMULATE_SCHEDULE: ${{ github.event.inputs.simulate_schedule || 'false' }}
       JOB_INDEX: '1'
       GROUP_SIZES: '3,2,2'
-      TARGET_HOUR_TORONTO: '6'        # updated so the internal check expects 6:00 AM Toronto
-      MAX_JITTER_SECONDS: '2400'      # you kept jitter; adjust if needed
+      TARGET_HOUR_TORONTO: '6'        # internal guard expects 6:00 AM Toronto
+      MAX_JITTER_SECONDS: '2400'
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 
     steps:
@@ -234,8 +234,8 @@ jobs:
           if [ -f dist/accounts.json ]; then
             echo "dist/accounts.json present"
           elif [ -f src/accounts.json ]; then
-            cp src/accounts.json dist/accounts.json
-            chmod 600 dist/accounts.json || true
+            cp src.accounts.json dist/accounts.json
+            chmod 600 dist.accounts.json || true
             echo "Copied src/accounts.json -> dist/accounts.json"
           else
             echo "WARNING: src/accounts.json missing — job may fail." >&2
