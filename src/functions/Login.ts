@@ -1498,22 +1498,33 @@ export class Login {
 
     // --------------- Enhanced Verification Methods ---------------
     private async checkLoggedIn(page: Page) {
-        const targetHostname = 'rewards.bing.com'
-        const targetPathname = '/'
+        const targetHostname = 'rewards.bing.com';
+
+        // Accept old UI (/) and new UI (/dashboard)
+        const validPaths = ['/', '/dashboard'];
 
         const maxAttempts = 120; // 120 seconds max (1s per iteration)
         let attempts = 0;
 
         while (attempts < maxAttempts) {
-            await this.dismissLoginMessages(page)
-            // Try dismissing occasional post-login onboarding/welcome modals
-            await this.dismissWelcomeModal(page)
-            // Actively handle optional prompts during the wait loop
-            await this.handleOptionalPrompts(page)
 
-            const currentURL = new URL(page.url())
-            if (currentURL.hostname === targetHostname && currentURL.pathname === targetPathname) {
-                break
+            await this.dismissLoginMessages(page);
+
+            // Try dismissing occasional post-login onboarding/welcome modals
+            await this.dismissWelcomeModal(page);
+
+            // Actively handle optional prompts during the wait loop
+            await this.handleOptionalPrompts(page);
+
+            const currentURL = new URL(page.url());
+
+            // OLD UI: /
+            // NEW UI: /dashboard
+            if (
+                currentURL.hostname === targetHostname &&
+                validPaths.includes(currentURL.pathname)
+            ) {
+                break;
             }
 
             attempts++;
@@ -1521,17 +1532,56 @@ export class Login {
         }
 
         if (attempts >= maxAttempts) {
-            this.bot.log(this.bot.isMobile, 'LOGIN', 'Timeout waiting for rewards portal after login attempts', 'error');
+            this.bot.log(
+                this.bot.isMobile,
+                'LOGIN',
+                'Timeout waiting for rewards portal after login attempts',
+                'error'
+            );
+
             throw new Error('Login redirect timeout');
         }
 
-        // Use enhanced portal detection from main branch
-        const portalSelector = await this.waitForRewardsRoot(page, 120000)
+        // 🔹 Use wrapper: supports legacy + modern UI
+        const portalSelector = await this.waitForAnyRewardsRoot(page, 120000);
+
         if (!portalSelector) {
-            throw this.bot.log(this.bot.isMobile, 'LOGIN', 'Rewards portal root element missing after navigation', 'error')
+            throw this.bot.log(
+                this.bot.isMobile,
+                'LOGIN',
+                'Rewards portal root element missing after navigation',
+                'error'
+            );
         }
 
-        this.bot.log(this.bot.isMobile, 'LOGIN', `Successfully logged into the rewards portal (${portalSelector})`)
+        this.bot.log(
+            this.bot.isMobile,
+            'LOGIN',
+            `Successfully logged into the rewards portal (${portalSelector})`
+        );
+    }
+
+
+    private async waitForAnyRewardsRoot(
+        page: Page,
+        timeoutMs: number
+    ): Promise<string | null> {
+
+        // Try legacy first (fast)
+        const oldResult = await this.waitForRewardsRoot(page, timeoutMs / 2)
+
+        if (oldResult) {
+            return `legacy:${oldResult}`
+        }
+
+        // Try modern UI
+        const newResult = await this.waitForRewardsRootNewUI(page, timeoutMs / 2)
+
+        if (newResult) {
+            return `modern:${newResult}`
+        }
+
+        return null
     }
 
     private async waitForRewardsRoot(page: Page, timeoutMs: number): Promise<string | null> {
@@ -1558,6 +1608,62 @@ export class Login {
         }
         return null
     }
+
+    private async waitForRewardsRootNewUI(
+        page: Page,
+        timeoutMs: number
+    ): Promise<string | null> {
+
+        const selectors = [
+
+            // Main content container
+            'main',
+            '[role="main"]',
+
+            // Activity / offer cards
+            'div[class*="activity"]',
+            'div[class*="offer"]',
+
+            // Points / balance
+            'span:has-text("points")',
+            'span:has-text("Points")',
+
+            // Rewards navigation
+            'a[href*="/rewards"]',
+            'a[href*="rewards.bing.com"]',
+
+            // React root
+            'div[id="root"]',
+            'div[id="app"]'
+        ]
+
+        const start = Date.now()
+
+        while (Date.now() - start < timeoutMs) {
+
+            // URL heuristic (important for SPA)
+            if (page.url().includes('rewards.bing.com')) {
+                return 'url:rewards.bing.com'
+            }
+
+            for (const sel of selectors) {
+
+                const count = await page
+                    .locator(sel)
+                    .count()
+                    .catch(() => 0)
+
+                if (count > 0) {
+                    return sel
+                }
+            }
+
+            await this.bot.utils.wait(300)
+        }
+
+        return null
+    }
+
 
     private async verifyBingContext(page: Page) {
         try {
@@ -1679,8 +1785,10 @@ export class Login {
         }
     }
 
+
     /**
      * Try to detect and close common "welcome/tour/onboarding" modals that appear after login.
+     * Updated to use a fallback `checkBingLoginStatus2_0` when the old login check fails.
      */
     private async dismissWelcomeModal(page: Page) {
         try {
@@ -1693,13 +1801,247 @@ export class Login {
                 }
             } catch { /* ignore URL parse errors */ }
 
+            // --- NEW: initial targeted passkey flow (white QR dialog -> click Cancel, then handle black error dialog) ---
+            // If these dialogs are not present, skip this flow and continue normally.
+            const tryHandleInitialPasskeySequence = async (): Promise<boolean> => {
+                try {
+                    // Quick DOM text probe for passkey QR dialog
+                    const bodyText = await page.evaluate(() => {
+                        const b = document.body;
+                        if (!b) return '';
+                        return (b as HTMLElement).innerText || b.textContent || '';
+                    }).catch(() => '');
+
+                    const lc = (bodyText || '').toLowerCase();
+
+                    // heuristics to identify the white QR passkey modal
+                    const whitePasskeyDetected = lc.includes('passkeys') ||
+                        (lc.includes('scan this qr') || lc.includes('scan this qr code') || lc.includes('use your phone or tablet')) ||
+                        lc.includes('choose where to save your passkey');
+
+                    if (!whitePasskeyDetected) {
+                        // nothing to do
+                        return false;
+                    }
+
+                    this.bot.log(this.bot.isMobile, 'DISMISS-WELCOME', 'Detected white passkey QR dialog — attempting to click Cancel/Back.');
+
+                    // Preferred cancel/back selectors for white dialog
+                    const cancelSelectors = [
+                        'button:has-text("Cancel")',
+                        'button[aria-label="Cancel"]',
+                        'button:has-text("Back")',
+                        'button[aria-label="Back"]',
+                        'button:has-text("Close")',
+                        'a:has-text("Cancel")',
+                        'input[type="button"][value="Cancel"]'
+                    ];
+
+                    // Try Playwright locators first
+                    for (const sel of cancelSelectors) {
+                        try {
+                            const loc = page.locator(sel).first();
+                            const cnt = await loc.count().catch(() => 0);
+                            if (cnt > 0) {
+                                const visible = await loc.isVisible().catch(() => false);
+                                if (visible) {
+                                    await loc.click({ force: true }).catch(() => {});
+                                    this.bot.log(this.bot.isMobile, 'DISMISS-WELCOME', `Clicked white-passkey Cancel via selector: ${sel}`);
+                                    await this.bot.utils.wait(300);
+                                    break;
+                                }
+                            }
+                        } catch (e) {
+                            this.bot.log(this.bot.isMobile, 'DISMISS-WELCOME', `White-passkey click attempt error for ${sel}: ${e}`, 'warn');
+                        }
+                    }
+
+                    // DOM fallback: click any button whose visible text is Cancel/Back/Close
+                    try {
+                        const clickedFallback = await page.evaluate(() => {
+                            const wanted = ['cancel', 'back', 'close', 'dismiss'];
+                            const candidates = Array.from(document.querySelectorAll('button, a, input[type="button"], input[type="submit"], div[role="button"]'));
+                            for (const el of candidates) {
+                                try {
+                                    let txt = '';
+                                    if (el instanceof HTMLElement) {
+                                        txt = el.innerText || (el.textContent || '');
+                                    } else if ((el as HTMLInputElement).value) {
+                                        txt = (el as HTMLInputElement).value || '';
+                                    } else {
+                                        txt = el.textContent || '';
+                                    }
+                                    txt = txt.trim().toLowerCase();
+                                    if (!txt) continue;
+                                    if (wanted.includes(txt)) {
+                                        el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                                        el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                                        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                                        return true;
+                                    }
+                                } catch {}
+                            }
+                            return false;
+                        }).catch(() => false);
+
+                        if (clickedFallback) {
+                            this.bot.log(this.bot.isMobile, 'DISMISS-WELCOME', 'Clicked white-passkey Cancel via DOM fallback.');
+                            await this.bot.utils.wait(250);
+                        }
+                    } catch (e) { /* ignore */ }
+
+                    // After attempting to close the white passkey dialog, probe for the black error dialog that often appears.
+                    await this.bot.utils.wait(350);
+
+                    const bodyText2 = await page.evaluate(() => {
+                        const b = document.body;
+                        if (!b) return '';
+                        return (b as HTMLElement).innerText || b.textContent || '';
+                    }).catch(() => '');
+
+                    const lc2 = (bodyText2 || '').toLowerCase();
+                    const blackErrorDetected = lc2.includes("couldn't create a passkey") || lc2.includes("we couldn't create a passkey") || lc2.includes('could not create a passkey');
+
+                    if (blackErrorDetected) {
+                        this.bot.log(this.bot.isMobile, 'DISMISS-WELCOME', 'Detected black "couldn\'t create a passkey" dialog — attempting to click Cancel.');
+
+                        const blackCancelSelectors = [
+                            'button:has-text("Cancel")',
+                            'button:has-text("Close")',
+                            'button[aria-label="Cancel"]',
+                            'button:has-text("Try again")', // If Try again is present we prefer not to click it; prefer Cancel
+                            'a:has-text("Cancel")',
+                            'input[type="button"][value="Cancel"]'
+                        ];
+
+                        // Try to click an explicit Cancel first
+                        let blackClicked = false;
+                        for (const sel of blackCancelSelectors) {
+                            try {
+                                const loc = page.locator(sel).first();
+                                const cnt = await loc.count().catch(() => 0);
+                                if (cnt > 0) {
+                                    const vis = await loc.isVisible().catch(() => false);
+                                    if (vis) {
+                                        // If this is "Try again" we only click if no Cancel exists
+                                        const isTryAgain = /try again/i.test(sel);
+                                        if (isTryAgain) continue;
+                                        await loc.click({ force: true }).catch(() => {});
+                                        this.bot.log(this.bot.isMobile, 'DISMISS-WELCOME', `Clicked black-passkey Cancel via selector: ${sel}`);
+                                        blackClicked = true;
+                                        await this.bot.utils.wait(250);
+                                        break;
+                                    }
+                                }
+                            } catch (e) {
+                                this.bot.log(this.bot.isMobile, 'DISMISS-WELCOME', `Black-passkey click attempt error for ${sel}: ${e}`, 'warn');
+                            }
+                        }
+
+                        // If no explicit Cancel found, DOM fallback: prefer clicking a button with "Cancel" text; otherwise click "Close" but avoid "Try again"
+                        if (!blackClicked) {
+                            try {
+                                const domClicked = await page.evaluate(() => {
+                                    const candidates = Array.from(document.querySelectorAll('button, a, input[type="button"], input[type="submit"], div[role="button"]'));
+                                    // prefer exact "cancel"
+                                    for (const el of candidates) {
+                                        try {
+                                            let txt = '';
+                                            if (el instanceof HTMLElement) txt = el.innerText || (el.textContent || '');
+                                            else if ((el as HTMLInputElement).value) txt = (el as HTMLInputElement).value;
+                                            else txt = el.textContent || '';
+                                            txt = (txt || '').trim().toLowerCase();
+                                            if (txt === 'cancel' || txt === 'close') {
+                                                el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                                                el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                                                el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                                                return true;
+                                            }
+                                        } catch {}
+                                    }
+                                    // fallback: click any button that contains "cancel" or "close"
+                                    for (const el of candidates) {
+                                        try {
+                                            let txt = '';
+                                            if (el instanceof HTMLElement) txt = el.innerText || (el.textContent || '');
+                                            else if ((el as HTMLInputElement).value) txt = (el as HTMLInputElement).value;
+                                            else txt = el.textContent || '';
+                                            txt = (txt || '').trim().toLowerCase();
+                                            if (txt.includes('cancel') || txt.includes('close')) {
+                                                el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                                                el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                                                el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                                                return true;
+                                            }
+                                        } catch {}
+                                    }
+                                    return false;
+                                }).catch(() => false);
+
+                                if (domClicked) {
+                                    this.bot.log(this.bot.isMobile, 'DISMISS-WELCOME', 'Clicked black-passkey Cancel via DOM fallback.');
+                                    await this.bot.utils.wait(200);
+                                    blackClicked = true;
+                                }
+                            } catch (e) { /* ignore */ }
+                        }
+
+                        // As a last resort send Escape and a tiny body click to dismiss overlays
+                        if (!blackClicked) {
+                            try {
+                                await page.keyboard.press('Escape').catch(() => {});
+                                await page.mouse.click(10, 10).catch(() => {});
+                                this.bot.log(this.bot.isMobile, 'DISMISS-WELCOME', 'Sent Escape/body-click for black-passkey dialog fallback.');
+                                await this.bot.utils.wait(200);
+                            } catch {}
+                        }
+
+                        return true; // we handled (or tried to handle) passkey sequence
+                    }
+
+                    // If black error didn't appear, still return true because we closed (or attempted to close) the white dialog
+                    return true;
+                } catch (err) {
+                    this.bot.log(this.bot.isMobile, 'DISMISS-WELCOME', `Initial passkey handler error: ${err}`, 'warn');
+                    return false;
+                }
+            };
+
+            // attempt the initial passkey sequence, but don't block if it errors or doesn't find anything
+            try {
+                const passkeyFlowTried = await tryHandleInitialPasskeySequence();
+                if (passkeyFlowTried) {
+                    this.bot.log(this.bot.isMobile, 'DISMISS-WELCOME', 'Initial passkey flow executed (may have closed white QR and black error dialogs).');
+                } else {
+                    this.bot.log(this.bot.isMobile, 'DISMISS-WELCOME', 'No initial passkey dialogs detected — skipping initial passkey flow.');
+                }
+            } catch (e) {
+                this.bot.log(this.bot.isMobile, 'DISMISS-WELCOME', `Error running initial passkey flow: ${e}`, 'warn');
+            }
+
             // Ensure login is confirmed before attempting dismissal
             try {
                 const loggedIn = await Promise.race([
                     this.checkBingLoginStatus(page),
                     new Promise<boolean>(res => setTimeout(() => res(false), 5000)) // 5s fallback
                 ]);
-                if (!loggedIn) {
+                let finalLoggedIn = Boolean(loggedIn);
+
+                // If original check fails, try new UI-aware check as fallback
+                if (!finalLoggedIn) {
+                    this.bot.log(this.bot.isMobile, 'DISMISS-WELCOME', 'Primary login check failed — trying new UI login probe (checkBingLoginStatus2_0).');
+                    try {
+                        // give a little more time for navigation/UI to settle
+                        finalLoggedIn = await Promise.race([
+                            this.checkBingLoginStatus2_0(page),
+                            new Promise<boolean>(res => setTimeout(() => res(false), 7000)) // 7s fallback for new check
+                        ]);
+                    } catch (e) {
+                        this.bot.log(this.bot.isMobile, 'DISMISS-WELCOME', `checkBingLoginStatus2_0 error: ${e}`, 'warn');
+                    }
+                }
+
+                if (!finalLoggedIn) {
                     this.bot.log(this.bot.isMobile, 'DISMISS-WELCOME', 'Login not confirmed yet; skipping dismissal until after login.');
                     return;
                 }
@@ -2376,7 +2718,9 @@ export class Login {
 
 
 
-
+    /**
+     * Original simple login check (kept for fast-checking legacy UI).
+     */
     private async checkBingLoginStatus(page: Page): Promise<boolean> {
         try {
             await page.waitForSelector('#id_n', { timeout: 120000 })
@@ -2385,6 +2729,196 @@ export class Login {
             return false
         }
     }
+
+    /**
+     * New UI-aware login status check (checkBingLoginStatus2_0).
+     *
+     * Strategy:
+     *  - Try to locate/click a "Dashboard" tab (several selector fallbacks).
+     *  - Once there, check for presence of at least 2 of these indicators:
+     *      * available/ready-to-claim points
+     *      * "Your perk" / perks UI
+     *      * daily streak / streaks UI
+     *  - If >= 2 present, consider login confirmed.
+     *  - On success, attempt to click the "Earn" tab (so caller lands on Earn).
+     */
+    private async checkBingLoginStatus2_0(page: Page): Promise<boolean> {
+        try {
+            // Page-scoped guard (prevents infinite loops)
+            const DASH_FLAG = '__bingDashboardClickedOnce';
+
+            // Dashboard selectors (for new UI fix)
+            const dashboardSelectors = [
+                'a[aria-label="Dashboard"]',
+                'a:has-text("Dashboard")',
+                'button:has-text("Dashboard")',
+                'a[href*="/rewards/dashboard"]',
+                '[data-testid="dashboard-link"]',
+                'a[role="tab"]:has-text("Dashboard")'
+            ];
+
+            // Indicator selectors
+            const indicatorSelectors: { [k: string]: string[] } = {
+                points: [
+                    'text=Available points',
+                    'text=Available to claim',
+                    'text=Points available',
+                    '.available-points',
+                    '.points-available'
+                ],
+                perk: [
+                    'text=Your perk',
+                    'text=Your perks',
+                    '.perk',
+                    '.perks-section'
+                ],
+                streak: [
+                    'text=Daily streak',
+                    'text=streak',
+                    '.streak',
+                    '.daily-streak'
+                ]
+            };
+
+            /* ---------------------------------------------------
+               1) NEW UI FIX — Click Dashboard ONCE if never done
+            --------------------------------------------------- */
+
+            const alreadyClicked = await page.evaluate(
+                flag => (window as any)[flag] === true,
+                DASH_FLAG
+            ).catch(() => false);
+
+            if (!alreadyClicked) {
+                for (const sel of dashboardSelectors) {
+                    try {
+                        const loc = page.locator(sel).first();
+
+                        if (
+                            (await loc.count().catch(() => 0)) > 0 &&
+                            await loc.isVisible().catch(() => false)
+                        ) {
+                            await loc.click({ force: true }).catch(() => {});
+
+                            // Mark as clicked
+                            await page.evaluate(flag => {
+                                (window as any)[flag] = true;
+                            }, DASH_FLAG);
+
+                            this.bot.log(
+                                this.bot.isMobile,
+                                'CHECK-LOGIN-2.0',
+                                `Dashboard clicked once (new UI fix): ${sel}`
+                            );
+
+                            await this.bot.utils.wait(1000);
+                            break;
+                        }
+                    } catch { }
+                }
+            }
+
+            /* ---------------------------------------------------
+               2) Let UI settle
+            --------------------------------------------------- */
+
+            await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => { });
+            await this.bot.utils.wait(400);
+
+            /* ---------------------------------------------------
+               3) Check indicators
+            --------------------------------------------------- */
+
+            const checks: Record<string, boolean> = {
+                points: false,
+                perk: false,
+                streak: false
+            };
+
+            for (const [key, variants] of Object.entries(indicatorSelectors)) {
+                for (const v of variants) {
+                    try {
+                        if (v.startsWith('text=')) {
+                            const t = v.replace('text=', '');
+                            const loc = page.locator(`:text("${t}")`).first();
+
+                            if (
+                                (await loc.count().catch(() => 0)) > 0 &&
+                                await loc.isVisible().catch(() => false)
+                            ) {
+                                checks[key] = true;
+                                break;
+                            }
+                        } else {
+                            const loc = page.locator(v).first();
+
+                            if (
+                                (await loc.count().catch(() => 0)) > 0 &&
+                                await loc.isVisible().catch(() => false)
+                            ) {
+                                checks[key] = true;
+                                break;
+                            }
+                        }
+                    } catch { }
+                }
+            }
+
+            /* ---------------------------------------------------
+               4) Fallback: DOM text scan
+            --------------------------------------------------- */
+
+            const found = Object.values(checks).filter(Boolean).length;
+
+            if (found < 2) {
+                try {
+                    const body = await page.evaluate(
+                        () => document.body?.innerText || ''
+                    );
+
+                    const lc = body.toLowerCase();
+
+                    if (!checks.points && /points|claim/.test(lc)) {
+                        checks.points = true;
+                    }
+
+                    if (!checks.perk && /perk/.test(lc)) {
+                        checks.perk = true;
+                    }
+
+                    if (!checks.streak && /streak/.test(lc)) {
+                        checks.streak = true;
+                    }
+                } catch { }
+            }
+
+            /* ---------------------------------------------------
+               5) Final decision
+            --------------------------------------------------- */
+
+            const success = Object.values(checks).filter(Boolean).length;
+
+            this.bot.log(
+                this.bot.isMobile,
+                'CHECK-LOGIN-2.0',
+                `Indicators: ${JSON.stringify(checks)} (count=${success})`
+            );
+
+            return success >= 2;
+
+        } catch (err) {
+            this.bot.log(
+                this.bot.isMobile,
+                'CHECK-LOGIN-2.0',
+                `Probe error: ${err}`,
+                'warn'
+            );
+
+            return false;
+        }
+    }
+
+
 
     private async checkAccountLocked(page: Page) {
         await this.bot.utils.wait(2000)
