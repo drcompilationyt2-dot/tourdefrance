@@ -4,6 +4,7 @@ import type { BrowserContext, Cookie, Page } from 'patchright'
 import { randomInt } from 'crypto'
 import pkg from '../package.json'
 
+
 import type { BrowserFingerprintWithHeaders } from 'fingerprint-generator'
 
 import Browser from './browser/Browser'
