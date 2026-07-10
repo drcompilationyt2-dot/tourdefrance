@@ -2,6 +2,7 @@ import axios from 'axios'
 import type { BrowserFingerprintWithHeaders } from 'fingerprint-generator'
 import { randomInt } from 'crypto'
 
+
 import type { ChromeVersion, EdgeVersion } from '../interface/UserAgentUtil'
 import type { MicrosoftRewardsBot } from '../index'
 
